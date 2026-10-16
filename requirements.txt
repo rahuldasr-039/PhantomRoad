@@ -1,0 +1,11 @@
+# PhantomRoad: Adaptive Vision Reliability Agent
+# Technology Stack for OpenCV AI Competition 2026
+
+numpy>=1.24.0
+opencv-python>=4.8.0
+pillow>=9.5.0
+streamlit>=1.30.0
+pytest>=7.4.0
+boto3>=1.28.0
+pandas>=2.0.0
+altair>=5.0.0

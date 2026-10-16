@@ -469,6 +469,206 @@ def build_stage1_batch_timeline(records: List[Dict[str, Any]]) -> alt.VConcatCha
     return vconcat
 
 
+def build_degraded_frames_timeline_chart(records: List[Dict[str, Any]]) -> alt.Chart:
+    """
+    Renders an interactive timeline showing unique degraded frames, severity, and degradation types.
+    """
+    df = pd.DataFrame(records)
+
+    color_scale = alt.Scale(
+        domain=[
+            "Nominal",
+            "Degraded (Low Light)",
+            "Degraded (Low Contrast)",
+            "Degraded (Blur)",
+            "Degraded (Overexposed)",
+            "Degraded (Low Light + Low Contrast)",
+            "Degraded (Multiple Flags)"
+        ],
+        range=[
+            "#10b981",  # Green
+            "#f59e0b",  # Amber
+            "#a855f7",  # Purple
+            "#38bdf8",  # Sky Blue
+            "#fb923c",  # Orange
+            "#ef4444",  # Red
+            "#e11d48"   # Rose
+        ]
+    )
+
+    def map_category(status: str) -> str:
+        if status == "Nominal":
+            return "Nominal"
+        if status == "Degraded (Low Light)":
+            return "Degraded (Low Light)"
+        if status == "Degraded (Low Contrast)":
+            return "Degraded (Low Contrast)"
+        if status == "Degraded (Blur)":
+            return "Degraded (Blur)"
+        if status == "Degraded (Overexposed)":
+            return "Degraded (Overexposed)"
+        if "Low Light" in status and "Low Contrast" in status:
+            return "Degraded (Low Light + Low Contrast)"
+        return "Degraded (Multiple Flags)"
+
+    df["Category"] = df["Status Summary"].apply(map_category)
+
+    chart = alt.Chart(df).mark_circle(size=60).encode(
+        x=alt.X("Frame:Q", title="Video Frame Index"),
+        y=alt.Y("Flag Count:Q", title="Active Degradation Flag Count", scale=alt.Scale(domain=[-0.2, 3.2])),
+        color=alt.Color("Category:N", scale=color_scale, legend=alt.Legend(title="Optical Degradation State")),
+        tooltip=[
+            "Frame",
+            "Timestamp (s)",
+            "Laplacian Variance",
+            "Mean Brightness",
+            "RMS Contrast",
+            "Status Summary",
+            "Flag Count"
+        ]
+    ).properties(
+        height=200,
+        title="Unique Degraded Frames Timeline (Active Degradation Count per Frame)"
+    ).configure_view(
+        strokeOpacity=0
+    ).configure_axis(
+        gridColor="rgba(255,255,255,0.08)",
+        domainColor="rgba(255,255,255,0.2)",
+        labelColor="#94a3b8",
+        titleColor="#cbd5e1"
+    ).configure_title(
+        color="#f8fafc"
+    ).configure_legend(
+        labelColor="#cbd5e1",
+        titleColor="#f8fafc"
+    )
+    return chart
+
+
+def render_batch_summary_kpis(summary: Any) -> None:
+    """
+    Renders top KPI cards clearly distinguishing unique degraded frames from total flag occurrences,
+    breakdown of overlapping conditions, and factual explanation for blur threshold.
+    """
+    # Row 1: Core Telemetry KPIs
+    k1, k2, k3, k4, k5 = st.columns(5)
+
+    k1.metric(
+        "Unique Degraded Frames",
+        f"{summary.unique_degraded_frames} / {summary.frames_analyzed}",
+        f"{summary.unique_degraded_percentage:.1f}% of video"
+    )
+    k2.metric(
+        "Total Flag Occurrences",
+        summary.total_flag_occurrences,
+        f"{summary.total_flag_occurrences / max(1, summary.frames_analyzed):.2f} flags/frame"
+    )
+    k3.metric(
+        "Sharpness (Laplacian Var)",
+        f"{summary.mean_sharpness:.1f}",
+        f"Min: {summary.min_sharpness:.1f} | Max: {summary.max_sharpness:.1f}"
+    )
+    k4.metric(
+        "Luminance (Mean Y)",
+        f"{summary.mean_brightness:.1f}",
+        f"Range: {summary.min_brightness:.1f} - {summary.max_brightness:.1f}"
+    )
+    k5.metric(
+        "RMS Contrast (σ_Y / 255)",
+        f"{summary.mean_contrast:.3f}",
+        f"Min: {summary.min_contrast:.3f} | Max: {summary.max_contrast:.3f}"
+    )
+
+    # Row 2: Clarification and Overlap Breakdown Cards
+    c_clarify, c_blur = st.columns([1, 1])
+
+    with c_clarify:
+        st.markdown(f"""
+        <div class="hud-card" style="border-left: 4px solid #38bdf8; height: 100%;">
+            <div style="font-size: 13px; font-weight: 700; color: #60a5fa; text-transform: uppercase; margin-bottom: 6px;">
+                📊 Occurrences vs. Unique Degraded Frames Audit
+            </div>
+            <div style="font-size: 13px; color: #cbd5e1; line-height: 1.5;">
+                &bull; <strong>Total Flag Occurrences ({summary.total_flag_occurrences}):</strong> Sum of individual threshold triggers (Dark: {summary.dark_flag_count} + Low Contrast: {summary.low_contrast_flag_count} + Blur: {summary.blur_flag_count} + Overexposed: {summary.overexposed_flag_count}).<br/>
+                &bull; <strong>Unique Degraded Frames ({summary.unique_degraded_frames}):</strong> Distinct video frames having <em>at least one</em> degradation flag.<br/>
+                &bull; <strong>Multiplicity Breakdown:</strong><br/>
+                &nbsp;&nbsp;&ndash; <strong>Dual/Overlapping Flags:</strong> {summary.dual_flag_frames} frames ({summary.dual_flag_frames / max(1, summary.frames_analyzed) * 100:.1f}%) were <em>both</em> Dark & Low-Contrast.<br/>
+                &nbsp;&nbsp;&ndash; <strong>Single Flag:</strong> {summary.single_flag_frames} frames ({summary.single_flag_frames / max(1, summary.frames_analyzed) * 100:.1f}%).<br/>
+                &nbsp;&nbsp;&ndash; <strong>Nominal Frames:</strong> {summary.nominal_frames_count} frames ({summary.nominal_percentage:.1f}%).
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with c_blur:
+        st.markdown(f"""
+        <div class="hud-card" style="border-left: 4px solid #10b981; height: 100%;">
+            <div style="font-size: 13px; font-weight: 700; color: #34d399; text-transform: uppercase; margin-bottom: 6px;">
+                🔍 Blur Threshold Analysis (0 of {summary.frames_analyzed} Triggered)
+            </div>
+            <div style="font-size: 12px; color: #cbd5e1; line-height: 1.5;">
+                {summary.blur_explanation}
+            </div>
+            <div style="margin-top: 8px; font-size: 11px; color: #94a3b8; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 4px;">
+                Configured Blur Threshold: <code>τ_blur = {summary.blur_threshold:.1f}</code> &bull; 
+                Min Measured Sharpness: <code>{summary.min_sharpness:.1f}</code> &bull;
+                Safety Margin: <code>+{max(0.0, summary.min_sharpness - summary.blur_threshold):.1f}</code>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Robotics Safety vs Optical Telemetry Advisory
+    st.markdown("""
+    <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 8px; padding: 12px 16px; margin: 12px 0; font-size: 12px; color: #cbd5e1;">
+        <strong style="color: #60a5fa;">🛡️ Autonomous Robotics Advisory (Optical Quality vs. Scene Safety):</strong>
+        Low luminance (< 45.0) or low RMS contrast (< 0.12) measures <em>sensor operating conditions and epistemic evidence quality</em>—it does <strong>not</strong> prove that a scene is unsafe, that lane markings are absent, or that a collision is imminent. Night driving scenes with headlights naturally display low mean luminance while remaining drivable. Optical quality flags serve to down-weight camera certainty in multi-sensor fusion (e.g. LiDAR/radar handoff) and guide adaptive software compensation.
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_metric_reference_guide() -> None:
+    """
+    Renders comprehensive reference documentation for optical quality metrics,
+    including exact mathematical formulas, digital units, and normalization ranges.
+    """
+    guide_html = """
+    <div class="hud-card">
+        <h4 style="margin: 0 0 12px 0; color: #f8fafc;">📐 Optical Quality Metric Formulations, Units & Normalization</h4>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; font-size: 12px; color: #cbd5e1;">
+            <div style="background: rgba(0,0,0,0.25); padding: 12px; border-radius: 6px;">
+                <strong style="color: #38bdf8;">1. Pech-Pacheco Laplacian Variance (Sharpness)</strong><br/>
+                &bull; <strong>Formula:</strong> Var(∇²I) = (1/N) ∑_{x,y} (∇²I(x,y) - μ)² with 3×3 kernel<br/>
+                &bull; <strong>Units:</strong> Intensity variance (intensity levels)² ∈ [0, ∞)<br/>
+                &bull; <strong>Threshold:</strong> Flagged blurred if Var(∇²I) < τ_blur (Default: 85.0)<br/>
+                &bull; <strong>Interpretation:</strong> Sensitive to high-frequency edge transitions and texture. Note that sensor analog noise (ISO grain) also elevates this variance.
+            </div>
+            <div style="background: rgba(0,0,0,0.25); padding: 12px; border-radius: 6px;">
+                <strong style="color: #fbbf24;">2. Mean Luminance (Perceptual Brightness)</strong><br/>
+                &bull; <strong>Formula:</strong> Y = 0.299 R + 0.587 G + 0.114 B (ITU-R BT.601)<br/>
+                &bull; <strong>Units:</strong> 8-bit digital pixel values ∈ [0, 255]<br/>
+                &bull; <strong>Thresholds:</strong> Low Light if Y < 45.0 or shadow clip > 40%; Overexposed if Y > 200.0<br/>
+                &bull; <strong>Dynamic Range:</strong> P95 - P5 intensity spread ∈ [0, 255]
+            </div>
+            <div style="background: rgba(0,0,0,0.25); padding: 12px; border-radius: 6px;">
+                <strong style="color: #a78bfa;">3. Root Mean Square (RMS) Contrast</strong><br/>
+                &bull; <strong>Formula:</strong> C_RMS = (1/255) √[ (1/N) ∑_{i=1}^N (Y_i - Ȳ)² ] = σ_Y / 255<br/>
+                &bull; <strong>Units:</strong> Dimensionless normalized ratio ∈ [0.0, 1.0]<br/>
+                &bull; <strong>Threshold:</strong> Low Contrast if C_RMS < 0.12 (Default)<br/>
+                &bull; <strong>Interpretation:</strong> Quantifies tone dispersion across the luminance histogram.
+            </div>
+            <div style="background: rgba(0,0,0,0.25); padding: 12px; border-radius: 6px;">
+                <strong style="color: #34d399;">4. Information Density & Clipping Fractions</strong><br/>
+                &bull; <strong>Shannon Entropy:</strong> H = -∑ p_k log₂(p_k) ∈ [0.0, 8.0] bits<br/>
+                &bull; <strong>Underexposed Ratio:</strong> Fraction of pixels with Y < 20 (Deep shadows)<br/>
+                &bull; <strong>Overexposed Ratio:</strong> Fraction of pixels with Y > 235 (Specular clipping)<br/>
+                &bull; <strong>Composite Quality:</strong> Aggregated [0.0, 1.0] score weighting sharpness, contrast, exposure, and transmission.
+            </div>
+        </div>
+    </div>
+    """
+    st.markdown(guide_html, unsafe_allow_html=True)
+
+
+
 def render_detector_offline_alert() -> None:
     """
     Renders an actionable setup message when object detector weights are missing.

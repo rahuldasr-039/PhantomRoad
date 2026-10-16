@@ -24,6 +24,9 @@ from src.ui.components import (
     render_stage1_metrics_cards,
     build_stage1_histogram_chart,
     build_stage1_batch_timeline,
+    build_degraded_frames_timeline_chart,
+    render_batch_summary_kpis,
+    render_metric_reference_guide,
     render_decision_hud,
     render_detector_offline_alert,
     render_stage3_detector_view,
@@ -33,6 +36,12 @@ from src.video.frame_extractor import VideoLoader, VideoMetadata, validate_video
 from src.video.synthetic_generator import generate_synthetic_road_video, AVAILABLE_SCENARIOS
 from src.metrics.blur import compute_blur_metrics, compute_laplacian_map
 from src.metrics.illumination import compute_illumination_metrics, compute_intensity_histogram
+from src.metrics.batch_profiler import (
+    profile_video_batch,
+    summarize_records,
+    BatchAnalysisSummary,
+    FrameTelemetryRecord
+)
 from src.agent.action_executor import AdaptiveReliabilityAgent
 from src.agent.decision_engine import ReliabilityDecisionEngine
 from src.detector import (
@@ -70,8 +79,12 @@ def main():
         st.session_state.current_video_meta = None
     if "batch_analysis_records" not in st.session_state:
         st.session_state.batch_analysis_records = None
+    if "batch_summary" not in st.session_state:
+        st.session_state.batch_summary = None
     if "current_frame_idx" not in st.session_state:
         st.session_state.current_frame_idx = 0
+    if "inspector_frame_idx" not in st.session_state:
+        st.session_state.inspector_frame_idx = 0
 
     # Initialize Stage 3 detector and analyzers
     detector = get_road_scene_detector()
@@ -615,95 +628,284 @@ def main():
     # TAB 4: Full Video Batch Analysis & Export
     # -------------------------------------------------------------
     with tab_timeline:
-        st.markdown("### 📊 Automated Multi-Frame Optical Analysis")
-        st.caption("Sequentially extracts and profiles every frame in the video to compute full-timeline stability metrics.")
+        st.markdown("### 📊 Automated Multi-Frame Optical Analysis & Degradation Breakdown")
+        st.caption(
+            "High-throughput temporal video quality profiler with configurable frame sampling, precise accounting of "
+            "unique degraded frames versus total flag occurrences, factual blur threshold analysis, frame-level telemetry inspection, "
+            "and measured processing speed (FPS)."
+        )
+
+        # -------------------------------------------------------------
+        # PROFILING CONFIGURATION & OPTIMIZATION PANEL
+        # -------------------------------------------------------------
+        with st.expander("⚙️ Profiling Configuration, Frame Sampling & Thresholds", expanded=(st.session_state.batch_analysis_records is None)):
+            cfg_c1, cfg_c2, cfg_c3 = st.columns(3)
+            with cfg_c1:
+                stride_choice = st.select_slider(
+                    "Frame Sampling Stride (Throughput Speedup):",
+                    options=[1, 2, 5, 10, 30],
+                    value=1,
+                    format_func=lambda s: f"Step {s} ({'100% all frames' if s==1 else f'1/{s} sampling'})",
+                    help="Step 1 profiles every frame with full temporal fidelity. Step 5 provides ~5x speedup for macro trend sweeps."
+                )
+            with cfg_c2:
+                scope_choice = st.selectbox(
+                    "Analysis Frame Limit:",
+                    ["All Video Frames", "First 300 Frames (~10-15s)", "First 600 Frames (~20-30s)", "First 1500 Frames (~1 min)"],
+                    help="Limit frame count for rapid exploratory screening of long videos."
+                )
+                max_f_limit = None
+                if scope_choice == "First 300 Frames (~10-15s)":
+                    max_f_limit = 300
+                elif scope_choice == "First 600 Frames (~20-30s)":
+                    max_f_limit = 600
+                elif scope_choice == "First 1500 Frames (~1 min)":
+                    max_f_limit = 1500
+            with cfg_c3:
+                fast_profiling = st.checkbox(
+                    "Fast Optical Screening (Skip 2D-FFT)",
+                    value=True,
+                    help="Bypasses 2D-FFT calculation to boost throughput ~2.5x while retaining full spatial Laplacian sharpness, luminance, and RMS contrast."
+                )
+
+            st.caption(
+                f"_Active Optical Thresholds:_ Blur: `Var < {blur_th}` | "
+                f"Low-Light: `Y < {low_light_th}` | Overexposed: `Y > {overexp_th}` | Min Contrast: `C_RMS < {min_contrast_th}` "
+                "(Adjust in sidebar if desired)"
+            )
 
         run_col1, run_col2 = st.columns([1, 3])
         with run_col1:
-            run_batch = st.button("Run Full Video Quality Profiling", type="primary", use_container_width=True)
+            run_batch = st.button("🚀 Run Multi-Frame Video Profiling", type="primary", use_container_width=True)
 
+        # -------------------------------------------------------------
+        # PROFILING EXECUTION WITH MEASURED THROUGHPUT
+        # -------------------------------------------------------------
         if run_batch:
             try:
                 with VideoLoader(video_path) as loader:
                     total_f = loader.total_frames
-                    progress_bar = st.progress(0, text="Analyzing video frames...")
-                    records = []
-                    t_start = time.perf_counter()
+                    progress_bar = st.progress(0, text="Initializing video decoding pipeline...")
+                    status_banner = st.empty()
 
-                    for i, (f_idx, ts, f_bgr) in enumerate(loader.iterate_frames()):
-                        b_m = compute_blur_metrics(f_bgr, blur_threshold=blur_th)
-                        i_m = compute_illumination_metrics(
-                            f_bgr,
-                            low_light_threshold=low_light_th,
-                            overexposed_threshold=overexp_th,
-                            min_rms_contrast=min_contrast_th
-                        )
-                        records.append({
-                            "Frame": f_idx,
-                            "Timestamp (s)": round(ts, 3),
-                            "Laplacian Variance": b_m["laplacian_variance"],
-                            "Sharpness Score": b_m["sharpness_score"],
-                            "Status Blur": "Blurred" if b_m["is_blurred"] else "Sharp",
-                            "Mean Brightness": i_m["mean_brightness"],
-                            "RMS Contrast": i_m["rms_contrast"],
-                            "Dynamic Range": i_m["dynamic_range"],
-                            "Underexposed (%)": round(i_m["underexposed_ratio"] * 100.0, 2),
-                            "Overexposed (%)": round(i_m["overexposed_ratio"] * 100.0, 2),
-                            "Entropy (bits)": i_m["entropy"],
-                            "Status Lighting": "Low Light" if i_m["is_low_light"] else ("Overexposed" if i_m["is_overexposed"] else "Balanced"),
-                            "Status Contrast": "Low Contrast" if i_m["is_low_contrast"] else "Nominal"
-                        })
-                        progress_bar.progress((i + 1) / total_f, text=f"Processed frame {i + 1} of {total_f}...")
+                    def on_progress(done_n, total_n, fps_now):
+                        frac = min(1.0, done_n / max(1, total_n))
+                        progress_bar.progress(frac, text=f"Profiling frame {done_n} of {total_n} ({frac * 100:.1f}%)...")
+                        status_banner.caption(f"⚡ Instantaneous Processing Speed: **{fps_now:.1f} FPS**")
 
-                    t_elapsed = time.perf_counter() - t_start
-                    st.session_state.batch_analysis_records = records
-                    st.success(f"Analysis complete! Profiled {total_f} frames in {t_elapsed:.2f}s ({total_f / max(1e-3, t_elapsed):.1f} FPS).")
+                    summary = profile_video_batch(
+                        video_loader=loader,
+                        blur_threshold=blur_th,
+                        low_light_threshold=low_light_th,
+                        overexposed_threshold=overexp_th,
+                        min_rms_contrast=min_contrast_th,
+                        stride=stride_choice,
+                        max_frames=max_f_limit,
+                        compute_fft=not fast_profiling,
+                        progress_callback=on_progress
+                    )
+
+                    st.session_state.batch_summary = summary
+                    st.session_state.batch_analysis_records = [r.to_dict() for r in summary.records]
+                    status_banner.empty()
+                    st.success(
+                        f"✓ Multi-frame profiling complete! Processed {summary.frames_analyzed} frames "
+                        f"in {summary.elapsed_time_sec:.2f}s (Throughput: {summary.throughput_fps:.1f} FPS)."
+                    )
             except Exception as e:
-                st.error(f"Batch processing error: {e}")
+                st.error(f"Multi-frame profiling error: {e}")
 
-        if st.session_state.batch_analysis_records:
-            records = st.session_state.batch_analysis_records
-            df_records = pd.DataFrame(records)
+        # -------------------------------------------------------------
+        # RESULTS EXPLORATION & AUDIT SUITE
+        # -------------------------------------------------------------
+        if st.session_state.batch_summary is not None or st.session_state.batch_analysis_records is not None:
+            # Reconstruct summary if needed
+            if st.session_state.batch_summary is None and st.session_state.batch_analysis_records is not None:
+                df_temp = pd.DataFrame(st.session_state.batch_analysis_records)
+                recs = [
+                    FrameTelemetryRecord(
+                        frame_index=int(r["Frame"]),
+                        timestamp_sec=float(r["Timestamp (s)"]),
+                        laplacian_variance=float(r["Laplacian Variance"]),
+                        sharpness_score=float(r["Sharpness Score"]),
+                        mean_brightness=float(r["Mean Brightness"]),
+                        rms_contrast=float(r["RMS Contrast"]),
+                        dynamic_range=int(r["Dynamic Range"]),
+                        underexposed_ratio=float(r["Underexposed (%)"]) / 100.0,
+                        overexposed_ratio=float(r["Overexposed (%)"]) / 100.0,
+                        entropy=float(r["Entropy (bits)"]),
+                        is_blurred=(r["Blur Flag"] == "Blurred"),
+                        is_low_light=(r["Lighting Flag"] == "Low Light"),
+                        is_overexposed=(r["Lighting Flag"] == "Overexposed"),
+                        is_low_contrast=(r["Contrast Flag"] == "Low Contrast"),
+                        active_flags=[f for f in r.get("Active Flags", "").split(", ") if f and f != "None (Nominal)"],
+                        flag_count=int(r.get("Flag Count", 0)),
+                        is_degraded=bool(r.get("Is Degraded", False)),
+                        status_summary=str(r.get("Status Summary", "Nominal"))
+                    ) for r in st.session_state.batch_analysis_records
+                ]
+                st.session_state.batch_summary = summarize_records(
+                    records=recs,
+                    total_video_frames=len(recs),
+                    stride=1,
+                    elapsed_time_sec=1.0,
+                    throughput_fps=float(len(recs)),
+                    blur_threshold=blur_th,
+                    low_light_threshold=low_light_th,
+                    overexposed_threshold=overexp_th,
+                    min_rms_contrast=min_contrast_th
+                )
 
-            # KPI Summary Metrics
-            total_n = len(df_records)
-            blurred_n = len(df_records[df_records["Status Blur"] == "Blurred"])
-            low_light_n = len(df_records[df_records["Status Lighting"] == "Low Light"])
-            low_contrast_n = len(df_records[df_records["Status Contrast"] == "Low Contrast"])
-
-            kpi_c1, kpi_c2, kpi_c3, kpi_c4 = st.columns(4)
-            kpi_c1.metric(
-                "Mean Sharpness",
-                f"{df_records['Laplacian Variance'].mean():.1f}",
-                f"Min: {df_records['Laplacian Variance'].min():.1f}"
-            )
-            kpi_c2.metric(
-                "Mean Brightness",
-                f"{df_records['Mean Brightness'].mean():.1f}",
-                f"Range: {df_records['Mean Brightness'].min():.1f} - {df_records['Mean Brightness'].max():.1f}"
-            )
-            kpi_c3.metric(
-                "Mean RMS Contrast",
-                f"{df_records['RMS Contrast'].mean():.3f}"
-            )
-            kpi_c4.metric(
-                "Degradation Flags",
-                f"{blurred_n + low_light_n + low_contrast_n} frames",
-                f"Blur: {blurred_n} | Dark: {low_light_n} | LowCont: {low_contrast_n}"
-            )
+            summary = st.session_state.batch_summary
+            records_data = st.session_state.batch_analysis_records
+            df_records = pd.DataFrame(records_data)
 
             st.markdown("---")
-            st.markdown("#### 📉 Multi-Metric Temporal Timeline")
-            timeline_chart = build_stage1_batch_timeline(records)
-            st.altair_chart(timeline_chart, use_container_width=True)
+            # 1. KPI CARDS: Unique Degraded Frames vs Total Flag Occurrences & Blur Explanation
+            render_batch_summary_kpis(summary)
 
+            st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+
+            # 2. EXPLORATION TABS
+            b_tabs = st.tabs([
+                "📈 Temporal Degradation Charts",
+                "📋 Frame-Level Telemetry Table",
+                "🔍 Interactive Frame Inspector",
+                "📐 Metric Formulations & Reference Guide"
+            ])
+
+            # SUBTAB 1: Visual Charts
+            with b_tabs[0]:
+                st.markdown("#### 🎯 Unique Degraded Frames Timeline")
+                st.caption("Plots every analyzed frame with active degradation count and condition categories.")
+                deg_timeline_chart = build_degraded_frames_timeline_chart(records_data)
+                st.altair_chart(deg_timeline_chart, use_container_width=True)
+
+                st.markdown("#### 📉 Multi-Metric Continuous Value Trajectories")
+                st.caption("Traces continuous sharpness, luminance, and contrast variations across the video.")
+                multi_chart = build_stage1_batch_timeline(records_data)
+                st.altair_chart(multi_chart, use_container_width=True)
+
+            # SUBTAB 2: Frame-Level Table
+            with b_tabs[1]:
+                st.markdown("#### 📋 Detailed Frame-Level Telemetry Audit")
+                filter_c1, filter_c2 = st.columns([2, 1])
+                with filter_c1:
+                    filter_mode = st.radio(
+                        "Filter Table View:",
+                        [
+                            "All Analyzed Frames",
+                            "Only Unique Degraded Frames",
+                            "Only Low Light Frames",
+                            "Only Low Contrast Frames",
+                            "Only Blurred Frames",
+                            "Only Nominal Frames"
+                        ],
+                        horizontal=True
+                    )
+                with filter_c2:
+                    st.caption(f"Total Rows: **{len(df_records)}** (Stride: {summary.sampling_stride})")
+
+                # Filter dataset
+                if filter_mode == "Only Unique Degraded Frames":
+                    df_view = df_records[df_records["Is Degraded"] == True]
+                elif filter_mode == "Only Low Light Frames":
+                    df_view = df_records[df_records["Lighting Flag"] == "Low Light"]
+                elif filter_mode == "Only Low Contrast Frames":
+                    df_view = df_records[df_records["Contrast Flag"] == "Low Contrast"]
+                elif filter_mode == "Only Blurred Frames":
+                    df_view = df_records[df_records["Blur Flag"] == "Blurred"]
+                elif filter_mode == "Only Nominal Frames":
+                    df_view = df_records[df_records["Is Degraded"] == False]
+                else:
+                    df_view = df_records
+
+                st.dataframe(
+                    df_view,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Frame": st.column_config.NumberColumn("Frame #", format="%d"),
+                        "Timestamp (s)": st.column_config.NumberColumn("Time (s)", format="%.2fs"),
+                        "Laplacian Variance": st.column_config.NumberColumn("Sharpness (Var)", format="%.1f"),
+                        "Mean Brightness": st.column_config.NumberColumn("Brightness (Y)", format="%.1f"),
+                        "RMS Contrast": st.column_config.NumberColumn("RMS Contrast", format="%.3f"),
+                        "Status Summary": st.column_config.TextColumn("Optical Condition"),
+                        "Active Flags": st.column_config.TextColumn("Triggered Flags"),
+                    }
+                )
+                st.caption(f"Displaying {len(df_view)} matching records.")
+
+            # SUBTAB 3: Interactive Frame Inspector
+            with b_tabs[2]:
+                st.markdown("#### 🔍 Interactive Individual Frame Inspector")
+                st.caption("Inspect raw pixels, edge maps, and individual degradation flags for any frame in the dataset.")
+
+                all_frame_indices = [int(r["Frame"]) for r in records_data]
+                if all_frame_indices:
+                    f_pick_c1, f_pick_c2 = st.columns([2, 1])
+                    with f_pick_c1:
+                        selected_inspect_f = st.select_slider(
+                            "Select Video Frame to Inspect:",
+                            options=all_frame_indices,
+                            value=all_frame_indices[0],
+                            key="batch_inspect_slider"
+                        )
+                    with f_pick_c2:
+                        quick_action = st.selectbox(
+                            "Quick Navigation Presets:",
+                            ["Custom Frame", "Minimum Sharpness Frame", "Minimum Brightness Frame", "Minimum Contrast Frame"]
+                        )
+                        if quick_action == "Minimum Sharpness Frame":
+                            min_sharp_row = df_records.loc[df_records["Laplacian Variance"].idxmin()]
+                            selected_inspect_f = int(min_sharp_row["Frame"])
+                        elif quick_action == "Minimum Brightness Frame":
+                            min_bright_row = df_records.loc[df_records["Mean Brightness"].idxmin()]
+                            selected_inspect_f = int(min_bright_row["Frame"])
+                        elif quick_action == "Minimum Contrast Frame":
+                            min_cont_row = df_records.loc[df_records["RMS Contrast"].idxmin()]
+                            selected_inspect_f = int(min_cont_row["Frame"])
+
+                    # Fetch and display frame
+                    try:
+                        with VideoLoader(video_path) as loader:
+                            inspect_bgr = loader.get_frame(selected_inspect_f)
+                            if inspect_bgr is not None:
+                                matching_rec = next((r for r in records_data if r["Frame"] == selected_inspect_f), None)
+                                edge_map = compute_laplacian_map(inspect_bgr)
+
+                                img_c1, img_c2 = st.columns(2)
+                                with img_c1:
+                                    st.markdown(f"**Camera Frame #{selected_inspect_f} (RGB)**")
+                                    st.image(cv2.cvtColor(inspect_bgr, cv2.COLOR_BGR2RGB), use_container_width=True)
+                                with img_c2:
+                                    st.markdown(f"**Laplacian Gradient Edge Map**")
+                                    st.image(edge_map, use_container_width=True, clamp=True)
+
+                                if matching_rec:
+                                    st.markdown(f"""
+                                    <div class="hud-card" style="margin-top: 10px;">
+                                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+                                            <span><strong>Frame #{selected_inspect_f} Telemetry:</strong> Sharpness: <code>{matching_rec['Laplacian Variance']:.1f}</code> | Brightness: <code>{matching_rec['Mean Brightness']:.1f}</code> | RMS Contrast: <code>{matching_rec['RMS Contrast']:.3f}</code></span>
+                                            <span style="font-weight: 700; color: {'#34d399' if not matching_rec['Is Degraded'] else '#fbbf24'};">{matching_rec['Status Summary']}</span>
+                                        </div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                    except Exception as e:
+                        st.error(f"Error inspecting frame #{selected_inspect_f}: {e}")
+
+            # SUBTAB 4: Metric Reference Guide
+            with b_tabs[3]:
+                render_metric_reference_guide()
+
+            # 3. CSV EXPORT BUTTON
             st.markdown("---")
-            st.markdown("#### 📥 Export Stage 1 Telemetry Data")
+            st.markdown("#### 📥 Export Full Multi-Frame Telemetry Data")
             csv_data = df_records.to_csv(index=False).encode("utf-8")
             st.download_button(
-                label="Download Full Telemetry (CSV)",
+                label=f"Download Telemetry CSV ({len(df_records)} Frames)",
                 data=csv_data,
-                file_name=f"phantomroad_stage1_telemetry_{int(time.time())}.csv",
+                file_name=f"phantomroad_optical_telemetry_{int(time.time())}.csv",
                 mime="text/csv",
                 use_container_width=True
             )

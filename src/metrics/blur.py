@@ -9,14 +9,17 @@ import numpy as np
 
 def compute_blur_metrics(
     image: np.ndarray,
-    blur_threshold: float = 85.0
+    blur_threshold: float = 85.0,
+    compute_fft: bool = True
 ) -> Dict[str, Any]:
     """
-    Computes blur metrics using spatial Laplacian variance and 2D-FFT frequency ratio.
+    Computes blur metrics using spatial Laplacian variance and optional 2D-FFT frequency ratio.
 
     Args:
         image: Input image (BGR, BGRA, or Grayscale numpy array).
         blur_threshold: Laplacian variance threshold below which frame is flagged as blurred.
+        compute_fft: If True, computes 2D-FFT high frequency energy ratio. Can be disabled
+                     for high-throughput batch video screening.
 
     Returns:
         dict containing:
@@ -82,31 +85,33 @@ def compute_blur_metrics(
     laplacian = cv2.Laplacian(gray, cv2.CV_64F, ksize=3)
     lap_var = float(laplacian.var())
 
-    # 2. Frequency Domain: 2D FFT High-Frequency Energy Ratio
-    # Downsample large frames for fast FFT computation
-    h, w = gray.shape
-    scale = min(1.0, 256.0 / max(h, w))
-    if scale < 1.0:
-        small_gray = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    else:
-        small_gray = gray
+    # 2. Frequency Domain: 2D FFT High-Frequency Energy Ratio (Optional)
+    fft_high_freq_ratio = 0.0
+    if compute_fft:
+        # Downsample large frames for fast FFT computation
+        h, w = gray.shape
+        scale = min(1.0, 256.0 / max(h, w))
+        if scale < 1.0:
+            small_gray = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        else:
+            small_gray = gray
 
-    sh, sw = small_gray.shape
-    dft = np.fft.fft2(small_gray)
-    dft_shift = np.fft.fftshift(dft)
-    magnitude_spectrum = np.abs(dft_shift)
+        sh, sw = small_gray.shape
+        dft = np.fft.fft2(small_gray)
+        dft_shift = np.fft.fftshift(dft)
+        magnitude_spectrum = np.abs(dft_shift)
 
-    # Low frequency mask: circle with radius r at center
-    cy, cx = sh // 2, sw // 2
-    r = max(1, min(cy, cx) // 3)
-    y_indices, x_indices = np.ogrid[:sh, :sw]
-    dist_from_center = np.sqrt((x_indices - cx) ** 2 + (y_indices - cy) ** 2)
-    low_freq_mask = dist_from_center <= r
+        # Low frequency mask: circle with radius r at center
+        cy, cx = sh // 2, sw // 2
+        r = max(1, min(cy, cx) // 3)
+        y_indices, x_indices = np.ogrid[:sh, :sw]
+        dist_from_center = np.sqrt((x_indices - cx) ** 2 + (y_indices - cy) ** 2)
+        low_freq_mask = dist_from_center <= r
 
-    total_energy = float(np.sum(magnitude_spectrum)) + 1e-7
-    low_freq_energy = float(np.sum(magnitude_spectrum[low_freq_mask]))
-    high_freq_energy = max(0.0, total_energy - low_freq_energy)
-    fft_high_freq_ratio = float(high_freq_energy / total_energy)
+        total_energy = float(np.sum(magnitude_spectrum)) + 1e-7
+        low_freq_energy = float(np.sum(magnitude_spectrum[low_freq_mask]))
+        high_freq_energy = max(0.0, total_energy - low_freq_energy)
+        fft_high_freq_ratio = float(high_freq_energy / total_energy)
 
     # 3. Normalized Sharpness Score [0.0 - 1.0] using smooth logarithmic mapping
     sharpness_score = float(np.clip(np.log1p(lap_var) / np.log1p(500.0), 0.0, 1.0))

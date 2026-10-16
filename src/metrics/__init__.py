@@ -9,6 +9,13 @@ from .illumination import compute_illumination_metrics, compute_intensity_histog
 from .visibility import compute_visibility_metrics
 from .obstruction import compute_spatial_obstruction, TemporalObstructionFilter
 from .quality_assessor import QualityAssessor, FrameQualityMetrics
+from .batch_profiler import (
+    FrameTelemetryRecord,
+    BatchAnalysisSummary,
+    profile_single_frame,
+    profile_video_batch,
+    summarize_records
+)
 
 __all__ = [
     "compute_blur_metrics",
@@ -20,4 +27,10 @@ __all__ = [
     "TemporalObstructionFilter",
     "QualityAssessor",
     "FrameQualityMetrics",
+    "FrameTelemetryRecord",
+    "BatchAnalysisSummary",
+    "profile_single_frame",
+    "profile_video_batch",
+    "summarize_records",
 ]
+

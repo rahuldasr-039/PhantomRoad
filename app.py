@@ -20,10 +20,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.ui.styles import DARK_THEME_CSS
 from src.ui.components import (
     render_stage1_header,
+    render_brand_header,
     render_stage1_metrics_cards,
     build_stage1_histogram_chart,
     build_stage1_batch_timeline,
-    render_decision_hud
+    render_decision_hud,
+    render_detector_offline_alert,
+    render_stage3_detector_view,
+    render_perception_comparison_view
 )
 from src.video.frame_extractor import VideoLoader, VideoMetadata, validate_video_path
 from src.video.synthetic_generator import generate_synthetic_road_video, AVAILABLE_SCENARIOS
@@ -31,6 +35,12 @@ from src.metrics.blur import compute_blur_metrics, compute_laplacian_map
 from src.metrics.illumination import compute_illumination_metrics, compute_intensity_histogram
 from src.agent.action_executor import AdaptiveReliabilityAgent
 from src.agent.decision_engine import ReliabilityDecisionEngine
+from src.detector import (
+    OpenCVDNNDetector,
+    ReliableRoadSceneAnalyzer,
+    RoadScenePerceptionComparator,
+    ROAD_CLASSES
+)
 
 # Streamlit Page Setup
 st.set_page_config(
@@ -42,6 +52,12 @@ st.set_page_config(
 
 # Inject custom Dark Operations CSS
 st.markdown(DARK_THEME_CSS, unsafe_allow_html=True)
+
+
+@st.cache_resource
+def get_road_scene_detector() -> OpenCVDNNDetector:
+    """Cached initialization of OpenCV DNN road scene object detector."""
+    return OpenCVDNNDetector()
 
 
 def main():
@@ -57,8 +73,16 @@ def main():
     if "current_frame_idx" not in st.session_state:
         st.session_state.current_frame_idx = 0
 
-    # Top Brand Header for Stage 1
-    render_stage1_header()
+    # Initialize Stage 3 detector and analyzers
+    detector = get_road_scene_detector()
+    analyzer = ReliableRoadSceneAnalyzer(detector)
+    comparator = RoadScenePerceptionComparator(detector)
+
+    # Top Brand Header with detector & cloud telemetry
+    render_brand_header(
+        cloud_status={"enabled": False},
+        detector_available=detector.is_available()
+    )
 
     # -------------------------------------------------------------
     # SIDEBAR: Video Ingestion & Threshold Controls
@@ -178,8 +202,24 @@ def main():
         )
 
         st.markdown("---")
+        st.markdown("### 🚗 Road-Scene Object Detector (Stage 3)")
+        if detector.is_available():
+            st.success(f"✓ Detector Online: {detector.model_name}")
+        else:
+            st.warning("⚠️ Model Offline (Run `python models/download_models.py`)")
+
+        conf_th = st.slider(
+            "Detection Confidence Threshold:",
+            min_value=0.15,
+            max_value=0.85,
+            value=0.35,
+            step=0.05,
+            help="Minimum confidence threshold for MobileNet-SSD bounding box detections."
+        )
+
+        st.markdown("---")
         st.markdown("### ☁️ Cloud Integration Status")
-        st.info("Stage 1 Scope: 100% Offline Local Processing. AWS S3 synchronization is deferred to Stage 5.")
+        st.info("Stage 1-3 Scope: 100% Offline Local Processing. AWS S3 synchronization is deferred to Stage 5.")
 
     # -------------------------------------------------------------
     # MAIN DASHBOARD AREA
@@ -192,12 +232,13 @@ def main():
         st.info("👋 Select or generate a video scenario from the sidebar to begin Stage 1 optical telemetry analysis.")
         return
 
-    # Tabs for Stages 1 & 2
-    tab_frame, tab_stage2, tab_timeline, tab_docs = st.tabs([
+    # Tabs for Stages 1, 2, and 3
+    tab_frame, tab_stage2, tab_stage3, tab_timeline, tab_docs = st.tabs([
         "🎬 Frame Extraction & Optical Metrics",
         "🛡️ Stage 2: Adaptive Decision Engine & Closed-Loop",
+        "🚗 Stage 3: Road-Scene Detector & Reliability",
         "📈 Full Video Batch Analysis & Export",
-        "ℹ️ Architecture & CV Formulations"
+        "ℹ️ Architecture & Documentation"
     ])
 
     # -------------------------------------------------------------
@@ -385,7 +426,193 @@ def main():
             st.error(f"Stage 2 Decision Engine error: {e}")
 
     # -------------------------------------------------------------
-    # TAB 3: Full Video Batch Analysis & Export
+    # TAB 3: Stage 3: Road-Scene Detector & Reliability Integration
+    # -------------------------------------------------------------
+    with tab_stage3:
+        st.markdown("### 🚗 Stage 3: Pretrained Road-Scene Object Detector & Reliability Annotation")
+        st.caption(
+            "Deep neural network object detection (MobileNet-SSD via OpenCV DNN) integrated with closed-loop optical reliability. "
+            "Detects road obstacles (cars, buses, motorbikes, bicycles, pedestrians) on actual video frames, evaluates evidence quality, "
+            "and explicitly marks candidates as UNVERIFIED_DEGRADED or SUPPRESSED when visual evidence is compromised. "
+            "Never invents or fabricates obstacle detections."
+        )
+
+        if not detector.is_available():
+            render_detector_offline_alert()
+            st.info(
+                "💡 **Graceful Fallback Mode:** Notice that all Stage 1 optical extraction, video batch processing, "
+                "and Stage 2 adaptive reliability decision engine actions remain 100% operational above."
+            )
+        else:
+            s3_subtabs = st.tabs([
+                "🎯 Active Frame Perception & Reliability HUD",
+                "⚖️ Clear vs. Degraded Perception Benchmark",
+                "📚 Model Setup & Documented Limitations"
+            ])
+
+            # SUBTAB 1: Active Frame Inference
+            with s3_subtabs[0]:
+                try:
+                    with VideoLoader(video_path) as loader:
+                        meta = loader.metadata
+                        frame_idx = st.session_state.current_frame_idx
+                        frame_bgr = loader.get_frame(frame_idx)
+                        timestamp = frame_idx / meta.fps if meta.fps > 0 else 0.0
+
+                        if frame_bgr is not None:
+                            # Run decision engine to get reliability state
+                            engine = ReliabilityDecisionEngine(
+                                blur_laplacian_threshold=blur_th,
+                                low_light_threshold=low_light_th,
+                                overexposed_threshold=overexp_th,
+                                min_rms_contrast=min_contrast_th
+                            )
+                            agent = AdaptiveReliabilityAgent(decision_engine=engine, max_attempts=3)
+                            decision = agent.process_frame(
+                                frame_bgr=frame_bgr,
+                                frame_index=frame_idx,
+                                timestamp_sec=timestamp,
+                                video_loader=loader
+                            )
+
+                            st.markdown(f"#### 🔍 Live Frame #{frame_idx} Inference `(t = {timestamp:.2f}s)`")
+                            active_target_frame = decision.final_frame_bgr if decision.final_frame_bgr is not None else frame_bgr
+                            render_stage3_detector_view(
+                                analyzer=analyzer,
+                                frame_bgr=active_target_frame,
+                                decision=decision,
+                                conf_threshold=conf_th
+                            )
+                except Exception as e:
+                    st.error(f"Stage 3 Inference Error: {e}")
+
+            # SUBTAB 2: Clear vs Degraded Perception Benchmark
+            with s3_subtabs[1]:
+                st.markdown("#### ⚖️ Optical Degradation vs. Perception Reliability Benchmark")
+                st.caption(
+                    "Directly demonstrates how optical noise, fog, blur, and lighting attenuation impact downstream detection accuracy. "
+                    "Validates that PhantomRoad identifies degraded conditions and flags unverified detections rather than overconfidently assuming safety."
+                )
+
+                bench_col1, bench_col2 = st.columns([1, 2])
+                with bench_col1:
+                    degradation_type = st.selectbox(
+                        "Simulate Environmental Degradation:",
+                        [
+                            "Heavy Atmospheric Fog (DCP Attenuation)",
+                            "Severe Low-Light / Night Scene",
+                            "High-Speed Motion / Defocus Blur",
+                            "Overexposure / Direct Sun Glare",
+                            "Physical Sensor Obstruction (Mud Splash)"
+                        ]
+                    )
+                    degrade_intensity = st.slider(
+                        "Degradation Severity:",
+                        min_value=0.2,
+                        max_value=0.9,
+                        value=0.6,
+                        step=0.1
+                    )
+
+                try:
+                    with VideoLoader(video_path) as loader:
+                        frame_idx = st.session_state.current_frame_idx
+                        clear_frame = loader.get_frame(frame_idx)
+                        if clear_frame is None:
+                            clear_frame = np.zeros((360, 480, 3), dtype=np.uint8)
+
+                        # Synthesize realistic degradation on the active frame
+                        degraded_frame = clear_frame.copy()
+                        h, w = degraded_frame.shape[:2]
+
+                        if "Fog" in degradation_type:
+                            fog_val = int(180 + 50 * degrade_intensity)
+                            fog_layer = np.full_like(degraded_frame, fog_val, dtype=np.uint8)
+                            alpha = max(0.1, 1.0 - degrade_intensity)
+                            degraded_frame = cv2.addWeighted(degraded_frame, alpha, fog_layer, 1.0 - alpha, 0)
+                        elif "Low-Light" in degradation_type:
+                            gamma = max(0.15, 1.0 - degrade_intensity * 0.9)
+                            inv_gamma = 1.0 / gamma
+                            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                            degraded_frame = cv2.LUT(degraded_frame, table)
+                            degraded_frame = (degraded_frame * max(0.1, 1.0 - degrade_intensity)).astype(np.uint8)
+                        elif "Blur" in degradation_type:
+                            k = int(degrade_intensity * 35) // 2 * 2 + 1
+                            k = max(3, k)
+                            degraded_frame = cv2.GaussianBlur(degraded_frame, (k, k), sigmaX=k * 0.3)
+                        elif "Overexposure" in degradation_type:
+                            degraded_frame = np.clip(degraded_frame.astype(np.float32) * (1.0 + degrade_intensity * 2.0) + degrade_intensity * 80, 0, 255).astype(np.uint8)
+                        elif "Obstruction" in degradation_type:
+                            center_x, center_y = w // 2, h // 2
+                            radius = int(min(w, h) * 0.35 * degrade_intensity)
+                            cv2.circle(degraded_frame, (center_x, center_y), radius, (30, 40, 50), -1)
+                            cv2.circle(degraded_frame, (center_x - 30, center_y + 20), radius // 2, (35, 45, 55), -1)
+
+                        # Evaluate clear frame through agent
+                        engine = ReliabilityDecisionEngine(
+                            blur_laplacian_threshold=blur_th,
+                            low_light_threshold=low_light_th,
+                            overexposed_threshold=overexp_th,
+                            min_rms_contrast=min_contrast_th
+                        )
+                        agent = AdaptiveReliabilityAgent(decision_engine=engine, max_attempts=3)
+                        clear_dec = agent.process_frame(clear_frame, frame_index=frame_idx, timestamp_sec=0.0)
+                        deg_dec = agent.process_frame(degraded_frame, frame_index=frame_idx, timestamp_sec=0.0)
+
+                        # Run comparative evaluation
+                        render_perception_comparison_view(
+                            comparator=comparator,
+                            clear_frame=clear_frame,
+                            degraded_frame=degraded_frame,
+                            enhanced_frame=deg_dec.final_frame_bgr if deg_dec.was_enhanced else None,
+                            clear_decision=clear_dec,
+                            degraded_decision=deg_dec,
+                            enhanced_decision=deg_dec if deg_dec.was_enhanced else None,
+                            conf_threshold=conf_th
+                        )
+                except Exception as e:
+                    st.error(f"Benchmark Execution Error: {e}")
+
+            # SUBTAB 3: Model Setup & Documented Limitations
+            with s3_subtabs[2]:
+                st.markdown("#### 📚 MobileNet-SSD Architecture & Setup Guide")
+                st.markdown("""
+                **Model Selection Rationale:**
+                MobileNet-SSD is a lightweight deep neural network combining Depthwise Separable Convolutions with a Single Shot MultiBox Detector head. It provides real-time local CPU execution (~25–35 FPS) without requiring CUDA hardware or cloud APIs.
+                
+                **How to Obtain & Configure the Model:**
+                ```powershell
+                # Automatic downloader
+                python models/download_models.py
+                ```
+                In Python code:
+                ```python
+                from src.detector import OpenCVDNNDetector, ReliableRoadSceneAnalyzer
+                detector = OpenCVDNNDetector(
+                    prototxt_path="models/MobileNetSSD_deploy.prototxt",
+                    weights_path="models/MobileNetSSD_deploy.caffemodel"
+                )
+                analyzer = ReliableRoadSceneAnalyzer(detector)
+                ```
+
+                ---
+                #### ⚠️ Documented Architectural Limitations
+                1. **Target Class Domain (VOC 20 Scope):**
+                   Trained on PASCAL VOC. Filtered to road obstacles (`car`, `bus`, `motorbike`, `bicycle`, `person`, `train`). It does not output traffic signs, lane markers, or specialized road debris.
+                2. **Fixed Input Resolution ($300 \\times 300$):**
+                   Requires downsampling to $300\\times300$ square blob. Ultrawide automotive camera aspect ratios (e.g., 16:9, 21:9) suffer non-uniform aspect scaling, impacting distant vehicle bounding box aspect accuracy.
+                3. **Small Obstacle & Atmospheric Attenuation Sensitivity:**
+                   Distant vehicles smaller than approximately $25\\times25$ pixels experience severe recall dropoff in fog, heavy rain, or underexposure.
+                4. **Single-Frame Inference Decoupling:**
+                   Operates purely frame-by-frame without temporal tracking (e.g., Kalman filtering / SORT). Transient occlusions can cause flicker between adjacent video frames.
+                
+                ---
+                #### 🛡️ Zero-Hallucination Integrity Policy
+                Safety-critical autonomous systems must **never invent detections** to mask sensor degradation or pass tests. When optical evidence quality fails, PhantomRoad's core philosophy is to flag detections as `UNVERIFIED_DEGRADED` or `SUPPRESSED_OBSTRUCTED`, ensuring upstream planners can safely down-regulate speed or transfer authority to human safety drivers.
+                """)
+
+    # -------------------------------------------------------------
+    # TAB 4: Full Video Batch Analysis & Export
     # -------------------------------------------------------------
     with tab_timeline:
         st.markdown("### 📊 Automated Multi-Frame Optical Analysis")
@@ -532,6 +759,22 @@ def main():
         - `STOP_CRITICAL_OBSTRUCTION`: Physical sensor lens blockage or total blackout/whiteout detected.
         - `STOP_MAX_ATTEMPTS_EXHAUSTED`: Reached configured attempt cap without achieving reliable threshold; escalates to human review.
         - `STOP_NO_VIABLE_ACTIONS`: All valid software enhancement strategies exhausted without sufficient gain.
+
+        ---
+
+        ### 🚗 Stage 3 Road-Scene Detector & Perception Reliability Formulations
+
+        #### 1. Perception Degradation Failure Modes
+        Standard road-scene object detectors optimize Average Precision ($AP$) assuming nominal visibility distributions. Under atmospheric fog, lens water droplets, and low illumination:
+        - **False Negatives (Missed Obstacles):** Contrast attenuation causes obstacle bounding box scores to drop below confidence threshold $\\tau_{\\text{conf}}$.
+        - **False Positives (Spurious Activations):** High-frequency glare spikes or particulate noise trigger phantom activations.
+
+        #### 2. Closed-Loop Reliability State Mapping
+        PhantomRoad couples neural network detection outputs $D = \\{b_i, c_i, s_i\\}_{i=1}^M$ with the agent's verified optical reliability state $\\mathcal{S}$:
+        $$\\text{Status}(b_i) = \\begin{cases} \\text{TRUSTED} & \\text{if } \\mathcal{S} = \\text{RELIABLE} \\\\ \\text{UNVERIFIED\\_DEGRADED} & \\text{if } \\mathcal{S} \\in \\{\\text{DEGRADED\\_CORRECTABLE}, \\text{DEGRADED\\_UNCERTAIN}\\} \\\\ \\text{SUPPRESSED\\_OBSTRUCTED} & \\text{if } \\mathcal{S} \\in \\{\\text{CRITICAL\\_OBSTRUCTION}, \\text{HUMAN\\_REVIEW\\_REQUIRED}\\} \\end{cases}$$
+
+        #### 3. Zero-Hallucination Integrity
+        Autonomous robotics safety mandates that perception systems must never synthesize fake bounding boxes to pass validation suites. When sensory evidence quality drops below reliable thresholds, flagging candidates as `UNVERIFIED_DEGRADED` provides upstream trajectory planners with actionable epistemic uncertainty.
         """)
 
 

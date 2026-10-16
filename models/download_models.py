@@ -10,9 +10,10 @@ import sys
 MODELS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_FILES = {
-    "MobileNetSSD_deploy.prototxt": "https://raw.githubusercontent.com/chuanqi305/MobileNet-SSD/master/deploy.prototxt",
+    "MobileNetSSD_deploy.prototxt": "https://raw.githubusercontent.com/robmarkcole/object-detection-app/master/model/MobileNetSSD_deploy.prototxt.txt",
     "MobileNetSSD_deploy.caffemodel": "https://github.com/robmarkcole/object-detection-app/raw/master/model/MobileNetSSD_deploy.caffemodel"
 }
+
 
 
 def download_models() -> bool:

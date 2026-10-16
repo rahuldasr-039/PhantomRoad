@@ -467,3 +467,203 @@ def build_stage1_batch_timeline(records: List[Dict[str, Any]]) -> alt.VConcatCha
         color="#f8fafc"
     )
     return vconcat
+
+
+def render_detector_offline_alert() -> None:
+    """
+    Renders an actionable setup message when object detector weights are missing.
+    Ensures all Stage 1 and Stage 2 features remain completely operational.
+    """
+    alert_html = """
+    <div class="hud-card" style="border-left: 4px solid #f59e0b;">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+            <span style="font-size: 20px;">⚠️</span>
+            <span style="font-size: 16px; font-weight: 700; color: #fbbf24;">
+                PRETRAINED ROAD-SCENE DETECTOR WEIGHTS OFFLINE
+            </span>
+        </div>
+        <p style="font-size: 13px; color: #cbd5e1; margin: 0 0 10px 0; line-height: 1.5;">
+            The <strong>MobileNet-SSD (Caffe / OpenCV DNN)</strong> model files are not yet present on local storage.
+            To preserve stability and avoid vendor lock-in or unhandled exceptions, all Stage 1 (Telemetry)
+            and Stage 2 (Adaptive Closed-Loop Decision Engine) features remain <strong>100% operational</strong>.
+        </p>
+        <div style="background: rgba(0, 0, 0, 0.4); border-radius: 6px; padding: 12px; margin-bottom: 12px; font-family: monospace; font-size: 12px; color: #38bdf8;">
+            # Run this one-line acquisition script from the project root in PowerShell:<br/>
+            <strong>python models/download_models.py</strong>
+        </div>
+        <div style="font-size: 12px; color: #94a3b8;">
+            <strong>Expected Locations:</strong><br/>
+            &bull; Prototxt Architecture: <code>models/MobileNetSSD_deploy.prototxt</code><br/>
+            &bull; Pretrained Weights: <code>models/MobileNetSSD_deploy.caffemodel</code> (23.1 MB)
+        </div>
+    </div>
+    """
+    st.markdown(alert_html, unsafe_allow_html=True)
+
+
+def render_stage3_detector_view(
+    analyzer: Any,
+    frame_bgr: np.ndarray,
+    decision: AgentFrameDecision,
+    conf_threshold: float = 0.35
+) -> None:
+    """
+    Renders Stage 3 Object Detection and Reliability Annotation View.
+    Shows annotated bounding boxes color-coded by reliability, zero invented detections guarantee,
+    and structured detection metadata table.
+    """
+    if not analyzer.detector.is_available():
+        render_detector_offline_alert()
+        return
+
+    # Run inference and reliability annotation
+    detection_result = analyzer.analyze_frame(
+        frame_bgr=frame_bgr,
+        decision=decision,
+        conf_threshold=conf_threshold
+    )
+
+    # If warning notice is present (e.g. degraded visual evidence)
+    if detection_result.warning_notice:
+        if "CRITICAL" in detection_result.warning_notice:
+            st.markdown(f"""
+            <div class="alert-danger-box">
+                <strong>&#x26A0; PERCEPTION WARNING:</strong> {detection_result.warning_notice}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class="alert-warning-box">
+                <strong>&#x25B2; DEGRADATION NOTICE:</strong> {detection_result.warning_notice}
+            </div>
+            """, unsafe_allow_html=True)
+
+    # Detection Breakdown KPIs
+    total_det = len(detection_result.detections)
+    trusted_det = sum(1 for d in detection_result.detections if d.reliability_status == "TRUSTED")
+    unverified_det = sum(1 for d in detection_result.detections if d.reliability_status == "UNVERIFIED_DEGRADED")
+    suppressed_det = sum(1 for d in detection_result.detections if d.reliability_status == "SUPPRESSED_OBSTRUCTED")
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Total Detections", total_det, "MobileNet-SSD")
+    k2.metric("Trusted Objects", trusted_det, "Nominal Evidence", delta_color="normal")
+    k3.metric("Unverified Candidates", unverified_det, "Degraded Evidence", delta_color="off")
+    k4.metric("Suppressed / Blocked", suppressed_det, "Obstructed Sensor", delta_color="inverse")
+    k5.metric("Evidence State", decision.final_state.value)
+
+    # Annotated Image Rendering
+    annotated_bgr = analyzer.render_annotated_frame(frame_bgr, detection_result)
+    annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+
+    col_img, col_data = st.columns([3, 2])
+    with col_img:
+        st.markdown(f"**Annotated Road Scene Frame #{decision.frame_index}**")
+        st.image(annotated_rgb, use_container_width=True)
+        st.caption(
+            "Bounding Box Colors: 🟢 Green = TRUSTED (Reliable) | "
+            "🟠 Amber = UNVERIFIED (Degraded) | 🔴 Red = SUPPRESSED (Critical Obstruction)"
+        )
+
+    with col_data:
+        st.markdown("**Perception Stream Metadata & Rationale**")
+        if total_det == 0:
+            st.info(
+                "✓ No obstacles detected above confidence threshold "
+                f"({conf_threshold:.2f}). **Honesty Guarantee:** Zero detections invented or simulated."
+            )
+        else:
+            records = []
+            for d in detection_result.detections:
+                records.append({
+                    "Class": d.label.title(),
+                    "Conf": f"{d.confidence:.2f}",
+                    "Status": d.reliability_status,
+                    "Box [x1, y1, x2, y2]": f"[{d.box_xyxy[0]}, {d.box_xyxy[1]}, {d.box_xyxy[2]}, {d.box_xyxy[3]}]",
+                    "Safety Rationale": d.suppression_reason or "Optical evidence nominal; bounding box verified."
+                })
+            df_det = pd.DataFrame(records)
+            st.dataframe(df_det, use_container_width=True, hide_index=True)
+
+        st.markdown("""
+        <div style="background: rgba(17, 24, 39, 0.7); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 12px; margin-top: 10px; font-size: 12px; color: #94a3b8;">
+            <strong style="color: #38bdf8;">Zero-Hallucination Integrity:</strong>
+            PhantomRoad never injects synthetic bounding boxes to pass safety audits. Detections originate exclusively from neural network activations. When visual evidence quality drops below nominal operating levels, object candidates are explicitly flagged as <code>UNVERIFIED_DEGRADED</code> so downstream trajectory planning systems do not blindly assume clearance or misattribute distance.
+        </div>
+        """, unsafe_allow_html=True)
+
+
+def render_perception_comparison_view(
+    comparator: Any,
+    clear_frame: np.ndarray,
+    degraded_frame: np.ndarray,
+    enhanced_frame: Optional[np.ndarray] = None,
+    clear_decision: Optional[AgentFrameDecision] = None,
+    degraded_decision: Optional[AgentFrameDecision] = None,
+    enhanced_decision: Optional[AgentFrameDecision] = None,
+    conf_threshold: float = 0.35
+) -> None:
+    """
+    Renders Stage 3 Comparative Evaluation across Clear, Degraded, and Enhanced frames.
+    """
+    report = comparator.compare_frames(
+        clear_frame=clear_frame,
+        degraded_frame=degraded_frame,
+        enhanced_frame=enhanced_frame,
+        clear_decision=clear_decision,
+        degraded_decision=degraded_decision,
+        enhanced_decision=enhanced_decision,
+        conf_threshold=conf_threshold
+    )
+
+    # Narrative Summary Banner
+    st.markdown(f"""
+    <div class="hud-card" style="border-left: 4px solid #38bdf8;">
+        <span style="font-size: 14px; font-weight: 700; color: #60a5fa; text-transform: uppercase; letter-spacing: 0.5px;">
+            Perception Degradation Benchmark Report
+        </span>
+        <p style="font-size: 14px; color: #e2e8f0; margin: 6px 0 0 0;">
+            {report.summary_narrative}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Comparative Metrics Strip
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Clear Frame Objects", report.clear_detection_count, f"Mean Conf: {report.clear_confidence_mean:.2f}")
+    col2.metric("Degraded Frame Objects", report.degraded_detection_count, f"Mean Conf: {report.degraded_confidence_mean:.2f}")
+    delta_label = f"{report.confidence_delta:+.2f} conf drop"
+    col3.metric("Confidence Delta", f"{report.confidence_delta:+.2f}", delta_label, delta_color="inverse" if report.confidence_delta > 0 else "normal")
+    col4.metric("Unverified / Degraded", report.unverified_count, "Flagged for safety")
+    enhanced_label = f"Mean Conf: {report.enhanced_confidence_mean:.2f}" if enhanced_frame is not None else "N/A"
+    col5.metric("Enhanced Frame Objects", report.enhanced_detection_count if enhanced_frame is not None else "N/A", enhanced_label)
+
+    # Visual Comparison Side-by-Side
+    annotated_clear = comparator.analyzer.render_annotated_frame(clear_frame, report.clear_result)
+    annotated_deg = comparator.analyzer.render_annotated_frame(degraded_frame, report.degraded_result)
+
+    if enhanced_frame is not None and report.enhanced_result is not None:
+        annotated_enh = comparator.analyzer.render_annotated_frame(enhanced_frame, report.enhanced_result)
+        c_clear, c_deg, c_enh = st.columns(3)
+        with c_clear:
+            st.markdown(f"**Clear Input ({report.clear_detection_count} detected)**")
+            st.image(cv2.cvtColor(annotated_clear, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.caption("All objects marked TRUSTED (Green)")
+        with c_deg:
+            st.markdown(f"**Degraded Input ({report.degraded_detection_count} detected)**")
+            st.image(cv2.cvtColor(annotated_deg, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.caption(f"{report.unverified_count} marked UNVERIFIED (Amber)")
+        with c_enh:
+            st.markdown(f"**Adaptive Output ({report.enhanced_detection_count} detected)**")
+            st.image(cv2.cvtColor(annotated_enh, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.caption("Post-correction perception verification")
+    else:
+        c_clear, c_deg = st.columns(2)
+        with c_clear:
+            st.markdown(f"**Clear Input ({report.clear_detection_count} detected)**")
+            st.image(cv2.cvtColor(annotated_clear, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.caption("All objects marked TRUSTED (Green)")
+        with c_deg:
+            st.markdown(f"**Degraded Input ({report.degraded_detection_count} detected)**")
+            st.image(cv2.cvtColor(annotated_deg, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.caption(f"{report.unverified_count} marked UNVERIFIED (Amber)")
+

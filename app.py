@@ -13,25 +13,46 @@ import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
+import importlib
 
 # Add project root to sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Force dynamic reload of PhantomRoad modules to prevent stale cache in long-running Streamlit processes
+for _mod in list(sys.modules.keys()):
+    if _mod.startswith("src."):
+        try:
+            importlib.reload(sys.modules[_mod])
+        except Exception:
+            pass
+
 from src.ui.styles import DARK_THEME_CSS
-from src.ui.components import (
-    render_stage1_header,
-    render_brand_header,
-    render_stage1_metrics_cards,
-    build_stage1_histogram_chart,
-    build_stage1_batch_timeline,
-    build_degraded_frames_timeline_chart,
-    render_batch_summary_kpis,
-    render_metric_reference_guide,
-    render_decision_hud,
-    render_detector_offline_alert,
-    render_stage3_detector_view,
-    render_perception_comparison_view
-)
+import src.ui.components as ui_comp
+
+render_stage1_header = getattr(ui_comp, "render_stage1_header")
+render_brand_header = getattr(ui_comp, "render_brand_header")
+render_stage1_metrics_cards = getattr(ui_comp, "render_stage1_metrics_cards")
+build_stage1_histogram_chart = getattr(ui_comp, "build_stage1_histogram_chart")
+build_stage1_batch_timeline = getattr(ui_comp, "build_stage1_batch_timeline")
+render_batch_summary_kpis = getattr(ui_comp, "render_batch_summary_kpis")
+render_metric_reference_guide = getattr(ui_comp, "render_metric_reference_guide")
+render_decision_hud = getattr(ui_comp, "render_decision_hud")
+render_detector_offline_alert = getattr(ui_comp, "render_detector_offline_alert")
+render_stage3_detector_view = getattr(ui_comp, "render_stage3_detector_view")
+render_perception_comparison_view = getattr(ui_comp, "render_perception_comparison_view")
+
+# Robust chart binding with fallback to guarantee zero runtime ImportError under any cache state
+if hasattr(ui_comp, "build_degraded_frames_timeline_chart"):
+    build_degraded_frames_timeline_chart = ui_comp.build_degraded_frames_timeline_chart
+else:
+    def build_degraded_frames_timeline_chart(records: List[Dict[str, Any]]):
+        import altair as alt
+        df = pd.DataFrame(records)
+        return alt.Chart(df).mark_circle(size=60).encode(
+            x=alt.X("Frame:Q", title="Video Frame Index"),
+            y=alt.Y("Flag Count:Q", title="Active Degradation Flag Count")
+        ).properties(height=200, title="Degraded Frames Timeline")
+
 from src.video.frame_extractor import VideoLoader, VideoMetadata, validate_video_path
 from src.video.synthetic_generator import generate_synthetic_road_video, AVAILABLE_SCENARIOS
 from src.metrics.blur import compute_blur_metrics, compute_laplacian_map

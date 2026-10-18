@@ -225,7 +225,7 @@ For enterprise fleet operations and compliance archival, **Stage 4** introduces 
 | Issue | Resolution |
 | :--- | :--- |
 | `streamlit : The term 'streamlit' is not recognized` | Run via python module: `python -m streamlit run app.py` |
-| `No module named 'cv2'` | Run `python -m pip install opencv-python>=4.8.0` |
+| `No module named 'cv2'` | Run `python -m pip install opencv-python-headless>=4.8.0` (or `opencv-python>=4.8.0` locally) |
 | Video file fails to open | Ensure video codec is supported (H.264 / MP4V / MPEG4). Use MP4 format for best compatibility. |
 | Detector shows "Offline" | Run `python models/download_models.py` to download weights. |
 | Port 8501 is already in use | Run `python -m streamlit run app.py --server.port 8502` |

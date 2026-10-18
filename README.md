@@ -98,7 +98,8 @@ PhantomRoad/
 │   ├── reporting/
 │   │   └── audit_report.py          # Complete JSON compliance and CSV exporter
 │   ├── cloud/
-│   │   └── aws_integration.py       # Optional AWS S3 integration via boto3
+│   │   ├── aws_integration.py       # Enterprise S3 storage, presigned URLs, and IAM role auth
+│   │   └── cloud_pipeline.py        # Cloud event schemas, batch job dispatching & serverless templates
 │   └── ui/
 │       ├── styles.py                # Operations Dark Theme CSS & badges
 │       └── components.py            # Reusable Streamlit telemetry widgets
@@ -109,6 +110,10 @@ PhantomRoad/
 │   ├── test_video.py                # Tests for video decoding & synthetic generator
 │   ├── test_detector.py             # Tests for detector wrapper & safety flags
 │   ├── test_evaluation.py           # Tests for benchmark evaluation harness
+│   ├── test_stage1.py               # Comprehensive Stage 1 ingestion & telemetry test suite
+│   ├── test_stage2.py               # Comprehensive Stage 2 closed-loop decision test suite
+│   ├── test_stage3.py               # Comprehensive Stage 3 downstream perception test suite
+│   ├── test_stage4.py               # Comprehensive Stage 4 AWS cloud & S3 mocked test suite
 │   └── test_reporting_and_cloud.py  # Tests for JSON/CSV audit & offline AWS mode
 └── reports/                         # Default directory for exported audit reports
 ```
@@ -183,23 +188,35 @@ This generates a full markdown performance report including recovery rates, fals
 
 ---
 
-## 8. Optional AWS Integration
+## 8. Stage 4: Optional AWS Cloud Deployment & S3 Storage
 
-PhantomRoad runs **100% locally by default without requiring AWS credentials or cloud fees**.
+PhantomRoad runs **100% locally by default with zero network calls and zero cloud charges**. 
 
-If cloud synchronization is desired:
+For enterprise fleet operations and compliance archival, **Stage 4** introduces an optional hybrid AWS deployment:
+- **boto3 S3 Integration**: Automated archival of degraded video snippets, full-resolution frame snapshots, and verifiable audit reports (`audit_report.json`, `audit_report.csv`).
+- **Cryptographic Audit Manifest**: Every synced run automatically generates an immutable `manifest.json` containing run metadata and SHA-256 integrity checksums.
+- **Enterprise Security & Encryption**: Enforces Server-Side Encryption (`SSE-S3` / `AES256` or AWS KMS) and generates time-bounded presigned URLs ($TTL \le 3600\text{s}$) for secure sharing without exposing public S3 buckets.
+- **IAM Role & STS AssumeRole Support**: Supports EC2 Instance Profiles, ECS Task Roles, and STS `assume_role` for credential-less cloud execution alongside standard environment variables.
+- **100% Mocked Automated Testing**: Includes 22 automated test cases (`tests/test_stage4.py`) executing offline without network access or cloud charges.
+
+### Enabling Optional AWS Cloud Sync
 1. Copy `.env.example` to `.env`:
    ```powershell
    Copy-Item .env.example .env
    ```
-2. Configure your AWS credentials and S3 bucket name in `.env` or system environment variables:
+2. Enable `PHANTOMROAD_STORAGE_MODE=aws_s3` and specify your bucket:
    ```env
-   AWS_ACCESS_KEY_ID=your_key
-   AWS_SECRET_ACCESS_KEY=your_secret
-   AWS_DEFAULT_REGION=us-east-1
+   PHANTOMROAD_STORAGE_MODE=aws_s3
    PHANTOMROAD_S3_BUCKET=your-bucket-name
+   PHANTOMROAD_AWS_REGION=us-east-1
+   PHANTOMROAD_S3_ENCRYPTION=AES256
    ```
-3. Use the **Sync to AWS S3** button in the dashboard to archive videos and signed audit reports.
+3. Use the **☁️ Stage 4: Optional AWS Cloud Deployment & S3 Sync** tab in the dashboard to verify connectivity, dispatch jobs, and sync batch audit bundles.
+
+### Stage 4 Architecture & Operations Guides
+- [Cloud Processing Architecture](file:///c:/I-AIML/PROJECTS_2025-26/OPEN%20CV/PhantomRoad/docs/cloud_architecture.md): Hybrid edge-cloud data flow, compute tiers (Lambda, ECS Fargate), and Mermaid diagrams.
+- [AWS Deployment Guide](file:///c:/I-AIML/PROJECTS_2025-26/OPEN%20CV/PhantomRoad/docs/aws_deployment_guide.md): Step-by-step setup, least-privilege IAM policies, and TLS bucket policies.
+- [Cost & Security Checklist](file:///c:/I-AIML/PROJECTS_2025-26/OPEN%20CV/PhantomRoad/docs/cost_and_security_checklist.md): Financial estimation matrix ($0.00 local vs $0.35/mo), S3 lifecycle rules, and security guardrails.
 
 ---
 

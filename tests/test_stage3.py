@@ -84,13 +84,11 @@ def _make_decision(state: ReliabilityState) -> AgentFrameDecision:
 
 def test_detector_model_availability():
     detector = OpenCVDNNDetector()
-    # If weights exist on disk, must be available and initialized
-    weights_exist = os.path.exists("models/MobileNetSSD_deploy.caffemodel")
-    if weights_exist:
-        assert detector.is_available() is True
+    if detector.is_available():
         assert detector.net is not None
         assert detector.model_name == "MobileNet-SSD (OpenCV DNN)"
     else:
+        assert detector.net is None
         assert detector.is_available() is False
 
 

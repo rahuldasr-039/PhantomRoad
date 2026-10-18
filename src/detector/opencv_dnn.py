@@ -37,22 +37,33 @@ class OpenCVDNNDetector(BaseRoadSceneDetector):
         self.model_name = "MobileNet-SSD (OpenCV DNN)"
         self.net = None
 
-        if self.is_available():
+        has_files = bool(
+            os.path.exists(self.prototxt_path) and
+            os.path.exists(self.weights_path) and
+            os.path.getsize(self.weights_path) > 1000000  # at least ~1MB
+        )
+
+        if has_files:
             try:
-                self.net = cv2.dnn.readNetFromCaffe(self.prototxt_path, self.weights_path)
-                self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-                self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-            except Exception as e:
+                if hasattr(cv2.dnn, "readNetFromCaffe"):
+                    self.net = cv2.dnn.readNetFromCaffe(self.prototxt_path, self.weights_path)
+                elif hasattr(cv2.dnn, "readNet"):
+                    self.net = cv2.dnn.readNet(self.weights_path, self.prototxt_path)
+                if self.net is not None:
+                    self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+                    self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            except Exception:
                 self.net = None
 
     def is_available(self) -> bool:
         """
-        Verifies that actual model architecture and weight files exist on disk.
+        Verifies that actual model architecture and weight files exist on disk and net loaded successfully.
         """
         return bool(
             os.path.exists(self.prototxt_path) and
             os.path.exists(self.weights_path) and
-            os.path.getsize(self.weights_path) > 1000000  # at least ~1MB
+            os.path.getsize(self.weights_path) > 1000000 and
+            self.net is not None
         )
 
     def get_setup_message(self) -> str:

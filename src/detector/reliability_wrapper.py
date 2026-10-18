@@ -34,9 +34,6 @@ class ReliableRoadSceneAnalyzer:
         """
         raw_result = self.detector.detect(frame_bgr, conf_threshold=conf_threshold)
 
-        if not raw_result.model_available:
-            return raw_result
-
         state = decision.final_state
         raw_result.frame_reliability_state = state.value
 

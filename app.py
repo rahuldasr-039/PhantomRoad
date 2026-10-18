@@ -40,6 +40,9 @@ render_decision_hud = getattr(ui_comp, "render_decision_hud")
 render_detector_offline_alert = getattr(ui_comp, "render_detector_offline_alert")
 render_stage3_detector_view = getattr(ui_comp, "render_stage3_detector_view")
 render_perception_comparison_view = getattr(ui_comp, "render_perception_comparison_view")
+render_stage4_cloud_view = getattr(ui_comp, "render_stage4_cloud_view", None)
+
+from src.cloud import AWSVisionAuditManager
 
 # Robust chart binding with fallback to guarantee zero runtime ImportError under any cache state
 if hasattr(ui_comp, "build_degraded_frames_timeline_chart"):
@@ -112,9 +115,16 @@ def main():
     analyzer = ReliableRoadSceneAnalyzer(detector)
     comparator = RoadScenePerceptionComparator(detector)
 
+    # Initialize Stage 4 Cloud Audit Manager (Defaults to 100% Local Mode)
+    if "cloud_mode" not in st.session_state:
+        st.session_state.cloud_mode = os.getenv("PHANTOMROAD_STORAGE_MODE", "local")
+
+    audit_manager = AWSVisionAuditManager(storage_mode=st.session_state.cloud_mode)
+    cloud_status = audit_manager.get_status_info()
+
     # Top Brand Header with detector & cloud telemetry
     render_brand_header(
-        cloud_status={"enabled": False},
+        cloud_status=cloud_status,
         detector_available=detector.is_available()
     )
 
@@ -252,8 +262,23 @@ def main():
         )
 
         st.markdown("---")
-        st.markdown("### ☁️ Cloud Integration Status")
-        st.info("Stage 1-3 Scope: 100% Offline Local Processing. AWS S3 synchronization is deferred to Stage 5.")
+        st.markdown("### ☁️ Cloud Storage (Stage 4)")
+        cloud_choice = st.radio(
+            "Storage Architecture:",
+            ["Local Mode (100% Offline Default)", "AWS S3 Sync (Optional)"],
+            index=0 if st.session_state.get("cloud_mode", "local") == "local" else 1,
+            help="Local mode is 100% free and offline. Enable AWS S3 to archive incidents and audit reports."
+        )
+        target_mode = "aws_s3" if "AWS S3" in cloud_choice else "local"
+        if target_mode != st.session_state.get("cloud_mode"):
+            st.session_state.cloud_mode = target_mode
+            st.rerun()
+
+        if st.session_state.cloud_mode == "aws_s3":
+            st.caption(f"Target Bucket: `{audit_manager.bucket_name or 'Configured via .env'}`")
+            st.caption(f"Region: `{audit_manager.region_name}` | Encryption: `{audit_manager.encryption}`")
+        else:
+            st.caption("🔒 100% Local Execution (Zero AWS calls or fees)")
 
     # -------------------------------------------------------------
     # MAIN DASHBOARD AREA
@@ -266,12 +291,13 @@ def main():
         st.info("👋 Select or generate a video scenario from the sidebar to begin Stage 1 optical telemetry analysis.")
         return
 
-    # Tabs for Stages 1, 2, and 3
-    tab_frame, tab_stage2, tab_stage3, tab_timeline, tab_docs = st.tabs([
+    # Tabs for Stages 1, 2, 3, 4, Batch, and Docs
+    tab_frame, tab_stage2, tab_stage3, tab_timeline, tab_stage4, tab_docs = st.tabs([
         "🎬 Frame Extraction & Optical Metrics",
         "🛡️ Stage 2: Adaptive Decision Engine & Closed-Loop",
         "🚗 Stage 3: Road-Scene Detector & Reliability",
         "📈 Full Video Batch Analysis & Export",
+        "☁️ Stage 4: Optional AWS Cloud Deployment & S3 Sync",
         "ℹ️ Architecture & Documentation"
     ])
 
@@ -932,7 +958,21 @@ def main():
             )
 
     # -------------------------------------------------------------
-    # TAB 3: Stage 1 Architecture & CV Formulations
+    # TAB 5: Stage 4 AWS Cloud Deployment & S3 Audit Management
+    # -------------------------------------------------------------
+    with tab_stage4:
+        if render_stage4_cloud_view is not None:
+            render_stage4_cloud_view(
+                audit_manager=audit_manager,
+                batch_summary=st.session_state.batch_summary,
+                batch_records=st.session_state.batch_analysis_records,
+                current_video_path=video_path
+            )
+        else:
+            st.info("Stage 4 Cloud UI component is initializing...")
+
+    # -------------------------------------------------------------
+    # TAB 6: Architecture & Multi-Stage Mathematical Formulations
     # -------------------------------------------------------------
     with tab_docs:
         st.markdown("""
@@ -998,6 +1038,22 @@ def main():
 
         #### 3. Zero-Hallucination Integrity
         Autonomous robotics safety mandates that perception systems must never synthesize fake bounding boxes to pass validation suites. When sensory evidence quality drops below reliable thresholds, flagging candidates as `UNVERIFIED_DEGRADED` provides upstream trajectory planners with actionable epistemic uncertainty.
+
+        ---
+
+        ### ☁️ Stage 4 Cloud Architecture & S3 Sync Formulations
+
+        #### 1. Hybrid Edge-Cloud Processing Model
+        - **Edge In-Vehicle Tier (Real-Time Safety):** Low-latency ($< 30\\text{ms}$) per-frame metric calculation, autonomous action execution, and object reliability decoration run 100% locally on vehicle hardware without external API reliance.
+        - **Cloud Central Tier (Asynchronous Governance):** Incidents requiring human review or exhibiting optical degradation are batched and synced to S3 along with cryptographic SHA-256 manifests, JSON audit trails, and CSV metrics for fleet-wide analytics.
+
+        #### 2. Selective Incident Sync vs Continuous Ingestion
+        Naive cloud architectures stream 100% of clear video, wasting gigabytes of network bandwidth. PhantomRoad's edge agent implements **selective cloud sync**:
+        $$\\text{SyncToCloud}(V) = \\begin{cases} \\text{True} & \\text{if } \\exists f \\in V \\text{ where } \\mathcal{S}(f) \\neq \\text{RELIABLE} \\text{ or } \\text{HumanReviewReq}(f) \\\\ \\text{False} & \\text{otherwise (Retained locally or discarded)} \\end{cases}$$
+        This achieves $> 95\\%$ cloud bandwidth and storage cost reduction.
+
+        #### 3. Principle of Least Privilege (PoLP) Cloud Security
+        IAM policies strictly restrict permissions to `s3:PutObject`, `s3:GetObject`, and `s3:ListBucket` within designated object prefixes. Deletion rights (`s3:DeleteObject`) and wildcard admin roles are strictly prohibited, ensuring audit logs cannot be purged or manipulated.
         """)
 
 
